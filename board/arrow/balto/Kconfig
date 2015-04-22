@@ -1,0 +1,12 @@
+if TARGET_BALTO
+
+config SYS_BOARD
+	default "balto"
+
+config SYS_VENDOR
+	default "arrow"
+
+config SYS_CONFIG_NAME
+	default "balto"
+
+endif

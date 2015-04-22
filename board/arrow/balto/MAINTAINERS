@@ -1,0 +1,6 @@
+BALTO BOARD
+M:	Pierluigi Passaro <info@phoenixsoftware.it>
+S:	Maintained
+F:	board/arrow/balto/
+F:	include/configs/balto.h
+F:	configs/balto_defconfig
