@@ -22,6 +22,108 @@
 
 //#define DEBUG
 
+/* Port Function Registers */
+#define PORTn_base 0xFCFE3000
+#define Pn(n)	(PORTn_base + 0x0000 + n * 4)	/* Port register R/W */
+#define PSRn(n)	(PORTn_base + 0x0100 + n * 4)	/* Port set/reset register R/W */
+#define PPRn(n)	(PORTn_base + 0x0200 + n * 4)	/* Port pin read register R */
+#define PMn(n)	(PORTn_base + 0x0300 + n * 4)	/* Port mode register R/W */
+#define PMCn(n)	(PORTn_base + 0x0400 + n * 4)	/* Port mode control register R/W */
+#define PFCn(n)	(PORTn_base + 0x0500 + n * 4)	/* Port function control register R/W */
+#define PFCEn(n)	(PORTn_base + 0x0600 + n * 4)	/* Port function control expansion register R/W */
+#define PNOTn(n)	(PORTn_base + 0x0700 + n * 4)	/* Port NOT register W */
+#define PMSRn(n)	(PORTn_base + 0x0800 + n * 4)	/* Port mode set/reset register R/W */
+#define PMCSRn(n)	(PORTn_base + 0x0900 + n * 4)	/* Port mode control set/reset register R/W */
+#define PFCAEn(n)	(PORTn_base + 0x0A00 + n * 4)	/* Port Function Control Additional Expansion register R/W */
+#define PIBCn(n)	(PORTn_base + 0x4000 + n * 4)	/* Port input buffer control register R/W */
+#define PBDCn(n)	(PORTn_base + 0x4100 + n * 4)	/* Port bi-direction control register R/W */
+#define PIPCn(n)	(PORTn_base + 0x4200 + n * 4)	/* Port IP control register R/W */
+
+enum pfc_pin_alt_mode {ALT1=1, ALT2, ALT3, ALT4, ALT5, ALT6, ALT7, ALT8};
+enum pfc_pin_gpio_mode {GPIO_OUT=0, GPIO_IN=1};
+
+const u32 alt_settings[9][3] = {
+	/* PFCAEn, PFCEn, PFCn */
+	{0,0,0},/* dummy */
+	{0,0,0},/* 1st alternative function */
+	{0,0,1},/* 2nd alternative function */
+	{0,1,0},/* 3rd alternative function */
+	{0,1,1},/* 4th alternative function */
+	{1,0,0},/* 5th alternative function */
+	{1,0,1},/* 6th alternative function */
+	{1,1,0},/* 7th alternative function */
+	{1,1,1},/* 8th alternative function */
+};
+
+/* Arguments:
+   n = port(1-11)
+   b = bit(0-15)
+   d = direction('GPIO_IN','GPIO_OUT')
+*/
+void pfc_set_gpio(u8 n, u8 b, u8 d)
+{
+	*(u32 *)PMCSRn(n) = 1UL<<(b+16);	// Pin as GPIO
+	*(u32 *)PSRn(n) = 1UL<<(b+16) | (u32)d<< b;	// Set direction
+}
+
+/* Arguments:
+    n = port number (P1-P11)
+    b = bit number (0-15)
+    alt = Alternative mode ('ALT1'-'ALT7')
+    inbuf =  Input buffer (0=disabled, 1=enabled)
+    bi = Bidirectional mode (0=disabled, 1=enabled)
+*/
+void pfc_set_pin_function(u16 n, u16 b, u16 alt, u16 inbuf, u16 bi)
+{
+	u16 value;
+
+	/* Set PFCAEn */
+	value = *(u16 *)PFCAEn(n);
+	value &= ~(1UL<<b); // clear
+	value |= (alt_settings[alt][0] & 1UL) << b; // set(maybe)
+	*(u16 *)PFCAEn(n) = value;
+
+	/* Set PFCEn */
+	value = *(u16 *)PFCEn(n);
+	value &= ~(1UL<<b); // clear
+	value |= (alt_settings[alt][1] & 1UL) << b; // set(maybe)
+	*(u16 *)PFCEn(n) = value;
+
+	/* Set PFCn */
+	value = *(u16 *)PFCn(n);
+	value &= ~(1UL<<b); // clear
+	value |= (alt_settings[alt][2] & 1UL) << b; // set(maybe)
+	*(u16 *)PFCn(n) = value;
+
+	/* Set Pn */
+	/* Not used for alternative mode */
+	/* NOTE: PIP must be set to '0' for the follow peripherals and Pn must be set instead
+		<> Multi-function timer pulse unit
+		<> LVDS output interface
+		<> Serial sound interface
+	   For those, use this to set Pn: *(u32 *)PSRn(n) = 1UL<<(b+16) | direction<<(b);
+	*/
+
+	/* Set PIBCn */
+	value = *(u16 *)PIBCn(n);
+	value &= ~(1UL<<b); // clear
+	value |= inbuf << b; // set(maybe)
+	*(u16 *)PIBCn(n) = value;
+
+	/* Set PBDCn */
+	value = *(u16 *)PBDCn(n);
+	value &= ~(1UL<<b); // clear
+	value |= bi << b; // set(maybe)
+	*(u16 *)PBDCn(n) = value;
+
+	/* Alternative mode '1' (not GPIO '0') */
+	*(u32 *)PMCSRn(n) |= 1UL<<(b+16) | 1UL<<(b);
+
+	/* Set PIPCn so pin used for function '1'(not GPIO '0') */
+	*(u16 *)PIPCn(n) |= 1UL <<b;
+}
+
+
 int spi_flash_cmd(struct spi_slave *spi, u8 cmd, void *response, size_t len);
 struct spi_flash *spi_flash_probe(unsigned int bus, unsigned int cs,
 		unsigned int max_hz, unsigned int spi_mode);
@@ -44,7 +146,155 @@ int board_init(void)
 
 int board_early_init_f(void)
 {
+	/* This function runs early in the boot process, before u-boot is relocated
+	   to RAM (hence the '_f' in the function name stands for 'still running from
+	   flash'). A temporary stack has been set up for us which is why we can
+	   have this as C code. */
+
+	int i;
+
+	/* When booting from Parallel NOR, some pins need to be bi-directional */
+	/* CS0, RD, A1-A15 */
+	#if defined(CONFIG_BOOT_MODE0)
+	  #define NOR_BIDIR 1
+	  /* TODO: Replace '0' with 'NOR_BIDIR for those pins below */
+	#else
+	  #define NOR_BIDIR 0
+	#endif
+
 	rtc_reset();	/* to start rtc */
+
+	/* =========== Pin Setup =========== */
+	/* Specific for the RZ/H on the RSK board. Adjust for your board as needed. */
+
+	/* Serial Console */
+	pfc_set_pin_function(3, 0, ALT6, 0, 0);	/* P3_0 = TxD2 */
+	pfc_set_pin_function(3, 2, ALT4, 0, 0);	/* P3_2 = RxD2 */
+
+	/* QSPI_0 ch0 (booted in 1-bit, need to change to 4-bit) */
+	pfc_set_pin_function(9, 4, ALT2, 0, 1);	/* P9_4 = SPBIO00_0 (bi dir) */
+	pfc_set_pin_function(9, 5, ALT2, 0, 1);	/* P9_5 = SPBIO10_0 (bi dir) */
+	pfc_set_pin_function(9, 6, ALT2, 0, 1);	/* P9_6 = SPBIO20_0 (bi dir) */
+	pfc_set_pin_function(9, 7, ALT2, 0, 1);	/* P9_7 = SPBIO30_0 (bi dir) */
+
+	/* QSPI_0 ch1 (4-bit interface for dual QSPI mode) */
+	pfc_set_pin_function(2, 12, ALT4, 0, 1); /* P2_12 = SPBIO01_0 (bi dir) */
+	pfc_set_pin_function(2, 13, ALT4, 0, 1); /* P2_13 = SPBIO11_0 (bi dir) */
+	pfc_set_pin_function(2, 14, ALT4, 0, 1); /* P2_14 = SPBIO21_0 (bi dir) */
+	pfc_set_pin_function(2, 15, ALT4, 0, 1); /* P2_15 = SPBIO31_0 (bi dir) */
+
+	/* RIIC Ch 3 */
+	pfc_set_pin_function(1, 6, ALT1, 0, 1);	/* P1_6 = RIIC3SCL (bi dir) */
+	pfc_set_pin_function(1, 7, ALT1, 0, 1);	/* P1_7 = RIIC3SDA (bi dir) */
+
+	/* Ethernet */
+	pfc_set_pin_function(1, 14, ALT4, 0, 0); /* P1_14 = ET_COL */
+	pfc_set_pin_function(5, 9, ALT2, 0, 0);	/* P5_9 = ET_MDC */
+	pfc_set_pin_function(3, 3, ALT2, 0, 1);	/* P3_3 = ET_MDIO (bi dir) */
+	pfc_set_pin_function(3, 4, ALT2, 0, 0);	/* P3_4 = ET_RXCLK */
+	pfc_set_pin_function(3, 5, ALT2, 0, 0);	/* P3_5 = ET_RXER */
+	pfc_set_pin_function(3, 6, ALT2, 0, 0);	/* P3_6 = ET_RXDV */
+	pfc_set_pin_function(2, 0, ALT2, 0, 0);	/* P2_0 = ET_TXCLK */
+	pfc_set_pin_function(2, 1, ALT2, 0, 0);	/* P2_1 = ET_TXER */
+	pfc_set_pin_function(2, 2, ALT2, 0, 0);	/* P2_2 = ET_TXEN */
+	pfc_set_pin_function(2, 3, ALT2, 0, 0);	/* P2_3 = ET_CRS */
+	pfc_set_pin_function(2, 4, ALT2, 0, 0);	/* P2_4 = ET_TXD0 */
+	pfc_set_pin_function(2, 5, ALT2, 0, 0);	/* P2_5 = ET_TXD1 */
+	pfc_set_pin_function(2, 6, ALT2, 0, 0);	/* P2_6 = ET_TXD2 */
+	pfc_set_pin_function(2, 7, ALT2, 0, 0);	/* P2_7 = ET_TXD3 */
+	pfc_set_pin_function(2, 8, ALT2, 0, 0);	/* P2_8 = ET_RXD0 */
+	pfc_set_pin_function(2, 9, ALT2, 0, 0);	/* P2_9 = ET_RXD1 */
+	pfc_set_pin_function(2, 10, ALT2, 0, 0); /* P2_10 = ET_RXD2 */
+	pfc_set_pin_function(2, 11, ALT2, 0, 0); /* P2_11 = ET_RXD3 */
+	//pfc_set_pin_function(4, 14, ALT8, 0, 0); /* P4_14 = IRQ6 (ET_IRQ) */ /* NOTE: u-boot doesn't enable interrupts */
+
+	/* SDRAM */
+	pfc_set_pin_function(5, 8, ALT6, 0, 0);	/* P5_8 = CS2 */
+	for(i=0;i<=15;i++)
+		pfc_set_pin_function(6, i, ALT1, 0, 1);	/* P6_0~15 = D0-D15 (bi dir) */
+	pfc_set_pin_function(7, 2, ALT1, 0, 0);	/* P7_2 = RAS */
+	pfc_set_pin_function(7, 3, ALT1, 0, 0);	/* P7_3 = CAS */
+	pfc_set_pin_function(7, 4, ALT1, 0, 0);	/* P7_4 = CKE */
+	pfc_set_pin_function(7, 5, ALT1, 0, 0);	/* P7_5 = RD/WR */
+	pfc_set_pin_function(7, 6, ALT1, 0, 0);	/* P7_6 = WE0/DQMLL */
+	pfc_set_pin_function(7, 7, ALT1, 0, 0);	/* P7_7 = WE1/DQMLU */
+	for(i=9;i<=15;i++)
+		pfc_set_pin_function(7, i, ALT1, 0, 0);	/* P7_9~15: A1-A7 */
+	for(i=0;i<=15;i++)
+		pfc_set_pin_function(8, i, ALT1, 0, 0);	/* P8_0~15 = A8-A23 */
+
+	/* Parallel NOR Flash */
+	/* Assumes previous SDRAM setup A1-A23,D0-D15,WE0 */
+	pfc_set_pin_function(9, 0, ALT1, 0, 0);	/* P9_0 = A24 */
+	pfc_set_pin_function(9, 1, ALT1, 0, 0);	/* P9_1 = A25 */
+	pfc_set_pin_function(7, 8, ALT1, 0, 0);	/* P7_8 = RD */
+	pfc_set_pin_function(7, 0, ALT1, 0, 0);	/* P7_0 = CS0 */
+
+	/* LED 0 */
+	pfc_set_gpio(7, 1, GPIO_OUT); /* P7_1 = GPIO_OUT */
+
+
+	/**********************************************/
+	/* Configure NOR Flash Chip Select (CS0, CS1) */
+	/**********************************************/
+	#define CS0WCR_D	0x00000b40
+	#define CS0BCR_D	0x10000C00
+	#define CS1WCR_D	0x00000b40
+	#define CS1BCR_D	0x10000C00
+	*(u32 *)CS0WCR = CS0WCR_D;
+	*(u32 *)CS0BCR = CS0BCR_D;
+	*(u32 *)CS1WCR = CS1WCR_D;
+	*(u32 *)CS1BCR = CS1BCR_D;
+
+	/**********************************************/
+	/* Configure SDRAM (CS2, CS3)                 */
+	/**********************************************/
+	/* [[ RZ/A1H RSK BOARD ]]
+	* Note : This configuration is invalid for a single SDRAM and is a
+	*      : known limitation of the RSK+ board. The port pin used by
+	*      : CS3 is configured for LED0. To allow SDRAM operation CS2
+	*      : and CS3 must be configured to SDRAM. Option link R164 must
+	*      : NOT be fitted to avoid a Data Bus conflict on the SDRAM
+	*      : and expansion buffers. In a new application with one SDRAM
+	*      : always connect the SDRAM to CS3. On this RSK+ CS3 can not
+	*      : be used in another configuration including the expansion
+	*      : headers unless the SDRAM is completely disabled. For other
+	*      : external memory mapped devices CS1 is available for use
+	*      : with the expansion headers.
+	*      : See the hardware manual Bus State Controller
+	*/
+	/* Additionally, even though we are only using CS2, we need to set up
+	   the CS3 register becase some bits are common for CS3 and CS2 */
+
+	#define CS2BCR_D	0x00004C00
+	#define CS2WCR_D	0x00000480
+	#define CS3BCR_D	0x00004C00
+	#define CS3WCR_D	0x00004492
+	#define SDCR_D		0x00110811
+	#define RTCOR_D		0xA55A0080
+	#define RTCSR_D		0xA55A0008
+	*(u32 *)CS2BCR = CS2BCR_D;
+	*(u32 *)CS2WCR = CS2WCR_D;
+	*(u32 *)CS3BCR = CS3BCR_D;
+	*(u32 *)CS3WCR = CS3WCR_D;
+	*(u32 *)SDCR = SDCR_D;
+	*(u32 *)RTCOR = RTCOR_D;
+	*(u32 *)RTCSR = RTCSR_D;
+
+	/* wait */
+	#define REPEAT_D 0x000033F1
+	for (i=0;i<REPEAT_D;i++) {
+		asm("nop");
+	}
+
+	/* The final step is to set the SDRAM Mode Register by written to a
+	   specific address (the data value is ignored) */
+	/* Check the hardware manual if your settings differ */
+	#define SDRAM_MODE_CS2 0x3FFFD040
+	#define SDRAM_MODE_CS3 0x3FFFE040
+	*(u32 *)SDRAM_MODE_CS2 = 0;
+	*(u32 *)SDRAM_MODE_CS3 = 0;
+
 	return 0;
 }
 
@@ -238,14 +488,42 @@ struct read_mode {
 	u8 cmd;
 	char name[50];
 };
-#define READ_MODES 5
+#define READ_MODES 9
 const struct read_mode modes[READ_MODES] = {
-	{0x03, "Read Mode (3-byte Addr)"},
+	{0x03, "Read Mode (3-byte Addr) (RZ/A1 reset value)"},
 	{0x0C, "Fast Read Mode (4-byte Addr)"},
 	{0x6C, "Quad Read Mode (4-byte Addr)"},
 	{0xEC, "Quad I/O Read Mode (4-byte Addr)"},
 	{0xEE, "Quad I/O DDR Read Mode (4-byte Addr)"},
+	{0x0B, "Fast Read Mode (3-byte Addr)"},
+	{0x6B, "Quad Read Mode (3-byte Addr)"},
+	{0xEB, "Quad I/O Read Mode (3-byte Addr)"},
+	{0xED, "Quad I/O DDR Read Mode (3-byte Addr)"},
 };
+
+/**********************/
+/* Spansion S25FL512S */
+/**********************/
+#if 0
+ #define ADDRESS_BYTE_SIZE 3	/* Addresses are 3-bytes (A0-A23) */
+ #define FAST_READ 0x0B		/* Fast Read Mode (1-bit cmd, 1-bit addr, 1-bit data, 3-bytes of address) */
+ #define QUAD_READ 0x6B		/* Quad Read Mode (1-bit cmd, 1-bit addr, 4-bit data, 3-bytes of address) */
+ #define QUAD_IO_READ 0xEB	/* Quad I/O Read Mode (1-bit cmd, 4-bit addr, 4-bit data, 3-bytes of address) */
+ #define QUAD_IO_DDR_READ 0xED	/* Quad I/O DDR Read Mode (1-bit cmd, 1-bit addr, 4-bit data, 3-bytes of address) */
+#else
+ #define ADDRESS_BYTE_SIZE 4	/* Addresses are 4-bytes (A0-A31) */
+ #define FAST_READ 0x0C		/* Fast Read Mode (1-bit cmd, 1-bit addr, 1-bit data, 4-bytes of address) */
+ #define QUAD_READ 0x6C		/* Quad Read Mode (1-bit cmd, 1-bit addr, 4-bit data, 4-bytes of address) */
+ #define QUAD_IO_READ 0xEC	/* Quad I/O Read Mode (1-bit cmd, 4-bit addr, 4-bit data, 4-bytes of address) */
+ #define QUAD_IO_DDR_READ 0xEE	/* Quad I/O DDR Read Mode (1-bit cmd, 1-bit addr, 4-bit data, 4-bytes of address) */
+#endif
+
+/* Number of Dummy cycles between Address and data */
+/* Spansion S25FL512S, Latency Code (LC)=00 (chip default) */
+#define FAST_RD_DMY 8		/* Fast Read Mode */
+#define QUAD_RD_DMY 8		/* Quad Read Mode  */
+#define QUAD_IO_RD_DMY 4	/* Quad I/O Read Mode  */
+#define QUAD_IO_DDR_RD_DMY 6	/* Quad I/O DDR Read Mode  */
 
 /* QUAD SPI MODE */
 int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
@@ -340,9 +618,9 @@ int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 	/* Spansion S25FL512S */
 	/**********************/
 
-	/* Skip SPI Flas configure if already correct */
+	/* Skip SPI Flash configure if already correct */
 //	if ( data[1] != 0x02 ) {
-	if ( 1  ) {
+	if ( 1  ) { /* Do every time to keep dual SPI flash in sync*/
 		data[0] = 0x00;	/* status reg: Don't Care */
 		if( quad_data )
 			data[1] = 0x02; /* confg reg: Set QUAD, LC=00b */
@@ -351,11 +629,8 @@ int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 			//data[1] = 0x00; /* confg reg: clear QUAD, LC=00b */
 
 		if( quad_addr )
-#ifdef LC_SET_TO_11 /* Dangerous! Once you set LC=11, it break JTAG programming */
-			data[1] = 0xC2; /* confg reg: Set QUAD, LC=11b */
-#else
 			data[1] = 0x02; /* confg reg: Set QUAD, LC=00b */
-#endif
+
 		/* Send Write Enable (WREN 06h) */
 		ret |= spi_flash_cmd(my_spi_flash->spi, 0x06, NULL, 0);
 
@@ -382,7 +657,7 @@ int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 
 	if ( ret )
 	{
-		printf("Failed to set SPI Flash Configuratin register.\n");
+		printf("Failed to set SPI Flash Configuration register.\n");
 		return 1;
 	}
 
@@ -397,7 +672,6 @@ int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 	if( dual_chip ) {
 		/* Switch to dual memory */
 		cmncr |= 0x00000001UL;
-
 	}
 	else {
 		/* Switch to single memory */
@@ -406,33 +680,42 @@ int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 
 	/* 1-bit address, 4-bit data */
 	if( quad_data && !quad_addr ) {
-		/* Set read cmd to 0x6C (Quad Read) */
-		drcmr = 0x006C0000UL;
+		/* Set read cmd to Quad Read */
+		drcmr = (u32)QUAD_READ << 16;
 
 		/* width: 1-bit cmd, 1-bit addr, 4-bit data */
+#if (ADDRESS_BYTE_SIZE == 4)
 		/* address: 32 bits */
 		drenr = 0x00024f00UL;
-
+#else /* ADDRESS_BYTE_SIZE == 3 */
+		/* address: 24 bits */
+		drenr = 0x00024700UL;
+#endif
 		/* According to the Spansion spec (Table 8.5), dummy cycles
 		   are needed when LC=00b for QUAD READ commands */
 		/* Add extra Dummy cycles between address and data */
-		dmdmcr = 0x00020007; /* 4 bit width, 8 cycles */
+		dmdmcr = 0x00020000 | (QUAD_RD_DMY-1); /* 4 bit width, 8 cycles */
 		drenr |= 0x00008000; /* Set Dummy Cycle Enable (DME) */
 	}
 
 	/* 1-bit address, 1-bit data */
 	if( !quad_data && !quad_addr ) {
-		/* Set read cmd to 0x0C (FAST Read) */
-		drcmr =0x000C0000;
+		/* Set read cmd to FAST Read */
+		drcmr = (u32)FAST_READ << 16;
 
 		/* width: 1-bit cmd, 1-bit addr, 1-bit data */
+#if (ADDRESS_BYTE_SIZE == 4)
 		/* address: 32 bits */
 		drenr = 0x00004f00;
+#else /* ADDRESS_BYTE_SIZE == 3 */
+		/* address: 24 bits */
+		drenr = 0x00004700;
+#endif
 
 		/* According to the Spansion spec (Table 8.5), dummy cycles
 		   are needed when LC=00b for FAST READ commnds */
 		/* Add extra Dummy cycles between address and data */
-		dmdmcr = 0x00000007; /* 1 bit width, 8 cycles */
+		dmdmcr = 0x00000000 | (FAST_RD_DMY-1); /* 1 bit width, 8 cycles */
 		drenr |= 0x00008000; /* Set Dummy Cycle Enable (DME) */
 	}
 
@@ -449,12 +732,17 @@ int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 			See "Figure 10.37 Quad I/O Read Command Sequence" in Spansion spec
 		*/
 
-		/* Set read cmd to 0xEC (Quad I/O) */
-		drcmr =0x00EC0000;
+		/* Set read cmd to Quad I/O */
+		drcmr = (u32)QUAD_IO_READ << 16;
 
 		/* width: 1-bit cmd, 4-bit addr, 4-bit data */
+#if (ADDRESS_BYTE_SIZE == 4)
 		/* address: 32 bits */
 		drenr = 0x02024f00;
+#else /* ADDRESS_BYTE_SIZE == 3 */
+		/* address: 24 bits */
+		drenr = 0x02024700;
+#endif
 
 		/* Use Option data regsiters to output 0x00 to write the
 		   'mode' byte by sending OPD3 (at 4-bit) between address
@@ -465,11 +753,8 @@ int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 		/* According to the Spansion spec (Table 8.5), dummy cycles
 		   are needed when LC=00b for QUAD I/O READ commnds */
 		/* Add extra Dummy cycles between address and data */
-#ifdef LC_SET_TO_11 /* Dangerous! Once you set LC=11, it break JTAG programming */
-		dmdmcr = 0x00020000; /* 4 bit size, 1 cycle */
-#else
-		dmdmcr = 0x00020003; /* 4 bit size, 4 cycles */
-#endif
+		dmdmcr = 0x00020000 | (QUAD_IO_RD_DMY-1); /* 4 bit size, 4 cycles */
+
 		drenr |= 0x00008000; /* Set Dummy Cycle Enable (DME) */
 	}
 
@@ -478,8 +763,8 @@ int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 			"   The Spansion SPI flash has an extra phase in the command stream\n"
 			"   that we can't account for.\n");
 
-		/* Set read cmd to 0xEE (Read DDR Quad I/O) */
-		drcmr =0x00EE0000;
+		/* Set read cmd to Read DDR Quad I/O */
+		drcmr = (u32)QUAD_IO_DDR_READ << 16;
 
 		/* Address, option and data all 4-bit DDR */
 		drdrenr = 0x00000111;
@@ -487,7 +772,7 @@ int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 		/* According to the Spansion spec (Table 8.5), dummy cycles
 		   are needed when LC=00b for READ DDR QUAD I/O commnds */
 		/* Add extra Dummy cycles between address and data */
-		dmdmcr = 0x00020005; /* 4 bit size, 6 cycles */
+		dmdmcr = 0x00020000 | (QUAD_IO_DDR_RD_DMY-1); /* 4 bit size, 6 cycles */
 		drenr |= 0x00008000; /* Set Dummy Cycle Enable (DME) */
 	}
 	else {
@@ -509,7 +794,12 @@ int do_qspi(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 	/* Keep SSL low (SSLE=1) in case the next transfer is continugous with
 	   our last...saves on address cycle. */
 	*(u32 *)DRCR_0 = 0x00010301;
+	asm("nop");
 	*(volatile u32 *)DRCR_0;	/* Read must be done after cache flush */
+
+	/* Do some dummy reads (our of order) to help clean things up */
+	*(volatile u32 *)0x18000010;
+	*(volatile int *)0x18000000;
 
 	printf("New Mode: ");
 	cmd = (*(volatile long *)DRCMR_0 >> 16) & 0xFF;
