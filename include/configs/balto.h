@@ -79,7 +79,11 @@
 	"s2=sf probe 0:1; sf read 09000000 100000 500000\0" \
 	"s3=bootm start 0x09000000 - 0x09800000 ; bootm loados ; fdt memory 0x08000000 0x08000000\0" \
 	"s_boot=run s0 s1 s2 s3 qd; set bootargs ${baseargs} root=${sdev} panel=${panel}; fdt chosen; bootm go\0" \
-	"x0=echo Booting Linux to Internal RAM...\0" \
+	"m0=echo Booting XIP Linux to external RAM...\0" \
+	"m1=sf probe 0; sf read 09800000 C0000 10000; fdt addr 09800000\0" \
+	"m2=fdt memory 0x08000000 0x08000000\0" \
+	"m_boot=run m0 m1 m2 qd; set bootargs ${baseargs} root=${xdev} panel=${panel}; fdt chosen; bootx 18200000 09800000\0" \
+	"x0=echo Booting XIP Linux to Internal RAM...\0" \
 	"x1=sf probe 0; sf read 20500000 C0000 10000; fdt addr 20500000\0" \
 	"x2=fdt memory 0x20000000 0x00A00000\0" \
 	"x_boot=run x0 x1 x2 qd; set bootargs ${baseargs} root=${xdev} panel=${panel}; fdt chosen; bootx 18200000 20500000\0"
