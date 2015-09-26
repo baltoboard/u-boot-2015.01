@@ -70,7 +70,7 @@
 
 #define CONFIG_EXTRA_ENV_SETTINGS \
 	"panel=-1\0" \
-	"sdev=/dev/mmcblk0p1 rootwait rootdelay=3\0" \
+	"sdev=/dev/mmcblk0p1 rootwait rootdelay=3 init=/init\0" \
 	"xdev=/dev/null rootflags=physaddr=0x18800000 init=/init\0" \
 	"baseargs=console=ttySC3,115200\0" \
 	"qd=qspi dual a4 d4 sdr\0" \
